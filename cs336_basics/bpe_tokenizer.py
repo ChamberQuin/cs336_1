@@ -1,12 +1,13 @@
 import cProfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import pickle
 import pstats
 import regex as re
 from regex import Pattern
 
 from collections import defaultdict
 import time
-from typing import Iterator
+from typing import Iterator, Iterable
 
 from cs336_basics.pretokenization_example import find_chunk_boundaries
 
@@ -50,10 +51,10 @@ class BPETokenizerTrainer:
 
         # pre-tokenize, split text by special token, handle marks and represent with byte sequence
         # input string -> pre-token -> byte sequence
-        chunks = self.split_regex.split(text)
-        for chunk in chunks:
+        segments = self.split_regex.split(text)
+        for seg in segments:
             # use finditer instead of findall to avoid copying large data
-            for m in self.pre_token_regex.finditer(chunk):
+            for m in self.pre_token_regex.finditer(seg):
                 pre_token_bytes = m.group(0).encode(ENCODING)
                 pre_token_seq = tuple([pre_token.to_bytes() for pre_token in pre_token_bytes])
                 # print(pre_token_seq)
@@ -327,11 +328,146 @@ class BPETokenizerTrainer:
 
         return seq_by_id, seq_id_freq, pair_freq, pair_in_seq
 
+    def save_to(self, path: str):
+        print(f"save to path:{path}")
+        result = {"vocab": self.vocab, "merges": self.merges}
+        with open(path, "wb") as f:
+            pickle.dump(result, f)
+
+
 def test_naive_train():
     raw_str = "low low low low low lower lower widest widest widest newest newest newest newest newest newest"
     trainer = BPETokenizerTrainer(300, ["<|endoftext|>"])
     trainer.naive_train(raw_str)
 
 class BPETokenizer:
+    vocab: dict[int, bytes]
+    merges: list[Pair]
+    special_tokens: list[str]
+
+    vocab_reverse: dict[bytes, int]
+
+    def __init__(self, vocab: dict[int, bytes], merges: list[Pair], special_tokens: list[str] = None):
+        self.vocab = vocab
+        self.merges = merges
+
+        if special_tokens is not None:
+            # 正则匹配自左向右优先匹配，但 special_token 需要最长匹配。
+            # i.e. 对于 text `abc<end><doc>xyz`，special token `["<end>", "<end><doc>"]`，最左匹配输出 `(<end>|<end><doc>)`，最长匹配输出 `(<end><doc>|<end>)`
+            self.special_tokens = sorted(special_tokens, key=len, reverse=True)
+            # 正则增加 "("、")"，让 re.split 能保留分隔符（special token），special token 也需要转换为 token。
+            # i.e. regex.split(r"(<end>)", "foo<end>bar")，预期包含分隔符 <end>，输出 ["foo", "<end>", "bar"]
+            self.split_regex = re.compile(
+                "(" + "|".join(map(re.escape, self.special_tokens)) + ")"
+            )
+            self.special_tokens_set = set(self.special_tokens)
+        else:
+            self.special_tokens = None
+            self.split_regex = None
+            self.special_tokens_set = None
+        
+        self.pre_token_regex = re.compile(PAT)
+
+        max_token_id = 0
+        self.vocab_reverse = defaultdict(int)
+        for id, token in self.vocab.items():
+            self.vocab_reverse[token] = id
+            max_token_id = max(id, max_token_id)
+
+        # add special_tokens
+        if self.special_tokens is not None:
+            for special_token in special_tokens:
+                encoded = special_token.encode(ENCODING)
+                if not self.vocab_reverse[encoded]:
+                    max_token_id += 1
+                    self.vocab[max_token_id] = encoded
+                    self.vocab_reverse[encoded] = max_token_id
+
+    @staticmethod
+    def from_files(path: str, special_tokens: list[str] = None) -> "BPETokenizer":
+        with open(path, "rb") as f:
+            result = pickle.load(f)
+        vocab = result["vocab"]
+        merges = result["merges"]
+        return BPETokenizer(vocab, merges, special_tokens)
+
+    # return special token's id or encoded bytes
+    def pre_tokenize(self, text: str) -> list[tuple[bytes] | int]:
+        result = []
+        chunks = []
+        if self.split_regex is not None:
+            chunks = self.split_regex.split(text)
+            for i in range(len(chunks)):
+                if chunks[i] in self.special_tokens_set:
+                    chunks[i] = self.vocab_reverse[chunks[i].encode(ENCODING)]
+        else:
+            chunks = [text]
+
+        for chunk in chunks:
+            if isinstance(chunk, int):
+                result.append(chunk)
+            else:
+                for m in self.pre_token_regex.finditer(chunk):
+                    pre_token_bytes = m.group(0).encode(ENCODING)
+                    pre_token_seq = tuple([pre_token.to_bytes() for pre_token in pre_token_bytes])
+                    result.append(pre_token_seq)
+
+        return result
+
+    def tokenize(self, seq: tuple[bytes]) -> list[int]:
+        # print(f"tokenize seq:{seq}")
+        seq_set = set(seq)
+        for merge in self.merges:
+            if (merge[0] not in seq_set) or (merge[1] not in seq_set):
+                continue
+
+            new_seq = []
+            i = 0
+            while i < len(seq):
+                if i < len(seq) - 1 and (seq[i], seq[i + 1]) == merge:
+                    new_seq.append(seq[i] + seq[i + 1])
+                    i += 2
+                else:
+                    new_seq.append(seq[i])
+                    # print(f"direct append new_seq:{new_seq}")
+                    i += 1
+                
+            # print(f"tokenize need merge:{merge}, seq:{seq}, new_seq:{new_seq}")
+            seq = new_seq
+            seq_set = set(new_seq)
+
+        result = []
+        for b in seq:
+            result.append(self.vocab_reverse[b])
+        return result
+        
+    def encode(self, text: str) -> list[int]:
+        chunks = self.pre_tokenize(text)
+        # print(f"encode chunks:{chunks}")
+
+        result = []
+        for chunk in chunks:
+            if isinstance(chunk, int):
+                result.append(chunk)
+            else:
+                result.extend(self.tokenize(chunk))
+        # print(f"encode text:{text}, ids:{result}")
+        return result
+
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        for text in iterable:
+            for token in self.encode(text):
+                yield token
+
+    def decode(self, ids: list[int]) -> str:
+        result_bytes = bytes()
+        for id in ids:
+            result_bytes += self.vocab[id]
+            # print(f"decode vocab[id]:{self.vocab[id]}")
+        # replace malformed bytes with b'?'
+        text = result_bytes.decode(ENCODING, errors = "replace")
+        # print(f"decode ids:{ids}, text:{text}")
+        return text
+
 
 
