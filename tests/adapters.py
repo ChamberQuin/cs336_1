@@ -10,7 +10,7 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 from cs336_basics.bpe_tokenizer import BPETokenizer, BPETokenizerTrainer
-from cs336_basics.transformer import Embedding, Linear, RMSNorm
+from cs336_basics.transformer import Embedding, Linear, RMSNorm, RoPE, SwiGLUFFN
 
 
 
@@ -32,9 +32,9 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
-    model = Linear(d_in, d_out)
-    model.load_weight(weights)
-    return model.forward(in_features)
+    linear = Linear(d_in, d_out)
+    linear.load_weight(weights)
+    return linear.forward(in_features)
 
 def run_embedding(
     vocab_size: int,
@@ -54,9 +54,9 @@ def run_embedding(
     Returns:
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
-    model = Embedding(vocab_size, d_model)
-    model.load_weight(weights)
-    return model.forward(token_ids)
+    embedding = Embedding(vocab_size, d_model)
+    embedding.load_weight(weights)
+    return embedding.forward(token_ids)
 
 def run_swiglu(
     d_model: int,
@@ -87,8 +87,10 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
 
+    swiglu = SwiGLUFFN(d_model, d_ff)
+    swiglu.load_weight(w1_weight, w2_weight, w3_weight)
+    return swiglu.forward(in_features)
 
 def run_scaled_dot_product_attention(
     Q: Float[Tensor, " ... queries d_k"],
@@ -204,8 +206,8 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    raise NotImplementedError
-
+    rope = RoPE(theta, d_k, max_seq_len)
+    return rope.forward(in_query_or_key, token_positions)
 
 def run_transformer_block(
     d_model: int,
@@ -382,9 +384,9 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    model = RMSNorm(d_model, eps)
-    model.load_weight(weights)
-    return model.forward(in_features)
+    rmsnorm = RMSNorm(d_model, eps)
+    rmsnorm.load_weight(weights)
+    return rmsnorm.forward(in_features)
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
     """Given a tensor of inputs, return the output of applying SiLU
