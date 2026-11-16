@@ -4,7 +4,7 @@ from einops import einsum, rearrange
 import torch
 from torch import Tensor
 from math import cos, sin, sqrt
-from jaxtyping import Float, Int
+from jaxtyping import Float, Int, Bool
 
 class Linear(torch.nn.Module):
     in_features: int
@@ -146,7 +146,8 @@ class RoPE(torch.nn.Module):
         for i in range(self.max_seq_len):
             for k in range(self.d_k // 2):
                 cache[i][k] = self.cal_block_mat(i, k)
-        self.register_buffer("rotation_matrix", cache, persistent=True)
+        # rotation_matrix 是可重建缓存，不需要从 checkpoint 恢复。如果持久化，后续 self attention 加载权重时没有 rotation matrix 会报错。
+        self.register_buffer("rotation_matrix", cache, persistent=False)
 
     def cal_angle(self, pos: int, k: int):
         return pos / self.theta ** ((2 * k) / self.d_k)
@@ -176,6 +177,109 @@ class RoPE(torch.nn.Module):
         )
         # self.rotation_matrix: seq_len d_k/2 2 2
         # rotation_matrix: d_k/2 2 2
-        rotation_matrix = self.rotation_matrix[token_pos]
-        res = einsum(reshape_x, rotation_matrix, " ... n1 j, ... n1 i j-> ... n1 i")
+        ro_matrix = self.rotation_matrix[token_pos]
+        res = einsum(reshape_x, ro_matrix, " ... n1 j, ... n1 i j-> ... n1 i")
         return res.reshape(*x.shape)
+
+def softmax(x: Float[Tensor, " ..."], dim: int, temperature: float = 1.0) -> Float[Tensor, " ..."]:
+    # 由于 softmax 对“给所有输入同时加上同一个常数”是不变的，取指定维度的 max，用 x[i] - max 来保证 x[i].exp() ∈ (0, 1]，降低 exp 溢出 inf 的风险
+    max = torch.max(x, dim = dim, keepdim=True).values
+    shifted = torch.sub(x, max)
+    exp = torch.exp(shifted / temperature)
+    sum = torch.sum(exp, dim = dim, keepdim=True)
+    return exp / sum
+
+def scaled_dot_product_attention(
+        Q: Float[Tensor, " ... q d_k"],
+        K: Float[Tensor, " ... k d_k"],
+        V: Float[Tensor, " ... k d_v"],
+        mask: Bool[Tensor, " ... q k"] | None = None,
+    ) -> Float[Tensor, " ... q d_v"]:
+    d_k = Q.shape[-1]
+    dot_product = einsum(Q, K, " ... q d_k, ... k d_k-> ... q k")
+    # scale
+    dot_product = dot_product / sqrt(d_k)
+
+    if mask is not None:
+        factory_kwargs = {"device": Q.device, "dtype": Q.dtype}
+        dot_product = torch.where(
+            mask,
+            dot_product,
+            # -inf becomes zero after softmax
+            torch.tensor(float("-inf"), **factory_kwargs)
+        )
+
+    score = softmax(dot_product, dim = -1)
+    return einsum(score, V, " ... q k, ... k d_v-> ... q d_v")
+
+class MultiHeadSelfAttention(torch.nn.Module):
+    def __init__(self, d_model: int, num_heads: int, max_seq_len: int, theta: float, device = None, dtype = None):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads
+        self.factory_kwargs = {"device": device, "dtype": dtype}
+
+        if max_seq_len != 0:
+            self.rope = RoPE(theta, self.d_k, max_seq_len, device, dtype)
+
+        self.q_proj = Linear(self.d_model, self.d_model, device, dtype)
+        self.k_proj = Linear(self.d_model, self.d_model, device, dtype)
+        self.v_proj = Linear(self.d_model, self.d_model, device, dtype)
+        self.out_proj = Linear(self.d_model, self.d_model, device, dtype)
+
+    def load_weight(
+        self, 
+        q_proj_weight: Float[Tensor, " d_k d_in"],
+        k_proj_weight: Float[Tensor, " d_k d_in"],
+        v_proj_weight: Float[Tensor, " d_v d_in"],
+        out_proj_weight: Float[Tensor, " d_model d_v"],
+    ):
+        state_dict = {
+            "q_proj.weight": q_proj_weight,
+            "k_proj.weight": k_proj_weight,
+            "v_proj.weight": v_proj_weight,
+            "out_proj.weight": out_proj_weight,
+        }
+        # 需要（从 checkpoint）加载所有权重
+        self.load_state_dict(state_dict)
+
+    def concat_heads(self, x: Float[Tensor, "... head_dim seq_len d_k"]) -> Float[Tensor, "... seq_len d_model"]:
+        # 重排维度 + 合并维度，可以用 torch.transpose + torch.flatten/reshape 或 einops.rearrange
+        # 交换 head_dim、seq_len 维的位置（只换轴顺序，不改元素总和），把一段连续维度合并成一个维度（可能拷贝，不改元素总和）
+        # return x.transpose(-2, -3).flatten(start_dim=-2)
+        return rearrange(x, "... head_dim seq_len d_k -> ... seq_len (head_dim d_k)")
+
+    def split_heads(self, x: Float[Tensor, "... seq_len d_in"]) -> Float[Tensor, "... head_dim seq_len d_k"]:
+        # new_shape = x.shape[:-1] + (self.num_heads, self.d_k)
+        # return x.view(new_shape).transpose(-2, -3)
+        return rearrange(x, "... seq_len (head_dim d_k) -> ... head_dim seq_len d_k", head_dim = self.num_heads)
+    
+    def construct_causal_mask(self, seq_len: int) -> Bool[Tensor, "seq_len seq_len"]:
+        causal_mask = torch.triu(
+            torch.ones((seq_len, seq_len), **self.factory_kwargs),
+            diagonal=1,
+        ).bool()
+        # True in mask means visible, which can see itself and the past
+        return ~causal_mask
+
+    def forward(
+        self, 
+        x: Float[Tensor, " ... seq_len d_in"],
+        token_pos: Int[Tensor, " ... seq_len"] | None = None,
+    ) -> Float[Tensor, " ... seq_len d_out"]:
+        q_proj = self.split_heads(self.q_proj.forward(x))
+        k_proj = self.split_heads(self.k_proj.forward(x))
+        v_proj = self.split_heads(self.v_proj.forward(x))
+
+        # head_dim should be handled as a batched dimension, because in multi-head attention, attention is being applied independently for each head
+        if token_pos is not None:
+            # using unsqueeze to add head dim to the 1st dimension
+            q_proj = self.rope.forward(q_proj, token_pos.unsqueeze(1))
+            k_proj = self.rope.forward(k_proj, token_pos.unsqueeze(1))
+
+        seq_len = x.shape[-2]
+        causal_mask = self.construct_causal_mask(seq_len)
+        head_attn = scaled_dot_product_attention(q_proj, k_proj, v_proj, causal_mask)
+        attn = self.concat_heads(head_attn)
+        return self.out_proj.forward(attn)
