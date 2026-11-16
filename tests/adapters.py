@@ -10,7 +10,7 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 from cs336_basics.bpe_tokenizer import BPETokenizer, BPETokenizerTrainer
-from cs336_basics.transformer import Embedding, Linear, MultiHeadSelfAttention, RMSNorm, RoPE, SwiGLUFFN, scaled_dot_product_attention, softmax
+from cs336_basics.transformer import Embedding, Linear, MultiHeadSelfAttention, RMSNorm, RoPE, SwiGLUFFN, TransformerBlock, TransformerLM, scaled_dot_product_attention, softmax
 
 
 
@@ -281,8 +281,9 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
-
+    transformer_block = TransformerBlock(d_model, num_heads, d_ff, max_seq_len, theta)
+    transformer_block.load_weight(weights)
+    return transformer_block.forward(in_features)
 
 def run_transformer_lm(
     vocab_size: int,
@@ -363,8 +364,9 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
-
+    lm = TransformerLM(vocab_size, context_length, d_model, num_layers, num_heads, d_ff, rope_theta)
+    lm.load_weight(weights)
+    return lm.forward(in_indices)
 
 def run_rmsnorm(
     d_model: int,

@@ -73,7 +73,7 @@ class RMSNorm(torch.nn.Module):
     eps: float
     weight: torch.nn.Parameter
 
-    def __init__(self, d_model: int, eps: float, device = None, dtype = None) -> None:
+    def __init__(self, d_model: int, eps: float = 1e-5, device = None, dtype = None) -> None:
         super().__init__()
 
         self.d_model = d_model
@@ -226,20 +226,20 @@ class MultiHeadSelfAttention(torch.nn.Module):
         self.q_proj = Linear(self.d_model, self.d_model, device, dtype)
         self.k_proj = Linear(self.d_model, self.d_model, device, dtype)
         self.v_proj = Linear(self.d_model, self.d_model, device, dtype)
-        self.out_proj = Linear(self.d_model, self.d_model, device, dtype)
+        self.output_proj = Linear(self.d_model, self.d_model, device, dtype)
 
     def load_weight(
         self, 
         q_proj_weight: Float[Tensor, " d_k d_in"],
         k_proj_weight: Float[Tensor, " d_k d_in"],
         v_proj_weight: Float[Tensor, " d_v d_in"],
-        out_proj_weight: Float[Tensor, " d_model d_v"],
+        output_proj_weight: Float[Tensor, " d_model d_v"],
     ):
         state_dict = {
             "q_proj.weight": q_proj_weight,
             "k_proj.weight": k_proj_weight,
             "v_proj.weight": v_proj_weight,
-            "out_proj.weight": out_proj_weight,
+            "output_proj.weight": output_proj_weight,
         }
         # 需要（从 checkpoint）加载所有权重
         self.load_state_dict(state_dict)
@@ -282,4 +282,54 @@ class MultiHeadSelfAttention(torch.nn.Module):
         causal_mask = self.construct_causal_mask(seq_len)
         head_attn = scaled_dot_product_attention(q_proj, k_proj, v_proj, causal_mask)
         attn = self.concat_heads(head_attn)
-        return self.out_proj.forward(attn)
+        return self.output_proj.forward(attn)
+
+class TransformerBlock(torch.nn.Module):
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, max_seq_len: int, theta: float, device = None, dtype = None):
+        super().__init__()
+        eps = 1e-5
+        self.ln1 = RMSNorm(d_model, eps, device, dtype)
+        self.attn = MultiHeadSelfAttention(d_model, num_heads, max_seq_len, theta, device, dtype)
+        self.ln2 = RMSNorm(d_model, eps, device, dtype)
+        self.ffn = SwiGLUFFN(d_model, d_ff, device, dtype)
+
+        # 位置就是等差数列，预存以降低重复生成开销
+        token_pos = torch.arange(max_seq_len, device = device, dtype = torch.long)
+        self.register_buffer("token_pos", token_pos, persistent=False)
+
+    def load_weight(self, weights: dict[str, Tensor]):
+        self.load_state_dict(weights)
+    
+    def forward(self, x: Float[Tensor, "batch seq_len d_model"]) -> Float[Tensor, "batch seq_len d_model"]:
+        batch, seq_len, _ = x.shape
+        # 在预存的位置中，取前 s 个位置，形状为 (s,)。
+        # 在最前面插入长度为 1 的维度，形状为 (1, s)，对齐位置索引和 batch 维并自动广播到每个样本。
+        token_pos = self.token_pos[:seq_len].unsqueeze(0)
+
+        y = x + self.attn.forward(self.ln1.forward(x), token_pos)
+        y2 = y + self.ffn.forward(self.ln2.forward(y))
+        return y2
+
+class TransformerLM(torch.nn.Module):
+    def __init__(self, vocab_size: int, context_length: int, d_model: int, num_layers: int, num_heads: int, d_ff: int, rope_theta: float, device = None, dtype = None) -> None:
+        super().__init__()
+        self.token_embeddings = Embedding(vocab_size, d_model, device, dtype)
+        self.layers = torch.nn.ModuleList()
+        for _ in range(num_layers):
+            self.layers.append(
+                TransformerBlock(d_model, num_heads, d_ff, context_length, rope_theta, device, dtype)
+            )
+        self.ln_final = RMSNorm(d_model, 1e-5, device, dtype)
+        self.lm_head = Linear(d_model, vocab_size)
+
+    def load_weight(self, weights: dict[str, Tensor]):
+        self.load_state_dict(weights)
+
+    def forward(self, in_indices: Int[Tensor, " batch seq_len"]) -> Float[Tensor, " batch seq_len vocab_size"]:
+        x = self.token_embeddings.forward(in_indices)
+        for layer in self.layers:
+            x = layer.forward(x)
+        x = self.ln_final.forward(x)
+        x = self.lm_head.forward(x)
+        return x
+            
