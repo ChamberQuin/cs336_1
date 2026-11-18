@@ -333,3 +333,11 @@ class TransformerLM(torch.nn.Module):
         x = self.lm_head.forward(x)
         return x
             
+def cross_entropy(inputs: Float[Tensor, " batch vocab"], targets: Int[Tensor, " batch"]) -> Float[Tensor, ""]:
+    max = torch.max(inputs, dim = -1, keepdim = True).values
+    inputs = inputs - max
+
+    target_logits = torch.gather(inputs, dim = 1, index = targets.unsqueeze(1))
+
+    loss = torch.log(torch.sum(torch.exp(inputs), dim = -1)) - target_logits
+    return torch.mean(loss)
