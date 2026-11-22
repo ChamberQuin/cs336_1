@@ -1,9 +1,9 @@
-from typing import Any
+from typing import Any, Iterable
 
 from einops import einsum, rearrange
 import torch
 from torch import Tensor
-from math import cos, sin, sqrt
+from math import cos, pi, sin, sqrt
 from jaxtyping import Float, Int, Bool
 
 class Linear(torch.nn.Module):
@@ -341,3 +341,63 @@ def cross_entropy(inputs: Float[Tensor, " batch vocab"], targets: Int[Tensor, " 
 
     loss = torch.log(torch.sum(torch.exp(inputs), dim = -1)) - target_logits
     return torch.mean(loss)
+
+class AdamW(torch.optim.Optimizer):
+    def __init__(self, params, lr = 1e-3, betas = (0.9, 0.999), weight_decay = 0.01, eps = 1e-8):
+        defaults = {"lr": lr, "betas": betas, "weight_decay": weight_decay, "eps": eps}
+        super().__init__(params, defaults)
+
+    def step(self, closure = None):
+        loss = None if closure is None else closure()
+
+        for group in self.param_groups:
+            lr = group["lr"]
+            beta1, beta2 = group["betas"]
+            weight_decay = group["weight_decay"]
+            eps = group["eps"]
+
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                state = self.state[p]
+                t = state.get("t", 1)
+                
+                grad = p.grad.data
+                
+                lr_adjusted = lr * (sqrt(1 - beta2**t) / (1 - beta1**t))
+                p.data = p.data - lr * weight_decay * p.data
+                
+                m = state.get("m", torch.zeros_like(grad))
+                v = state.get("v", torch.zeros_like(grad))
+                m = beta1 * m + (1-beta1) * grad
+                v = beta2 * v + (1 - beta2) * grad * grad
+                state["m"] = m
+                state["v"] = v
+                
+                p.data = p.data - lr_adjusted * m / (torch.sqrt(v) + eps)
+                
+                state["t"] = t + 1
+        return loss
+
+def lr_cosine_schedule(t: int, lr_max: float, lr_min: float, t_w: int, t_c: int) -> float:
+    if t < t_w:
+        return (t / t_w) * lr_max
+    elif t_w <= t and t <= t_c:
+        return lr_min + 0.5 * (1 + cos((t - t_w) / (t_c - t_w) * pi)) * (lr_max - lr_min)
+    else:
+        return lr_min
+
+def gradient_clipping(params: Iterable[torch.nn.Parameter], max_lr_norm: float):
+    eps = 1e-6
+
+    grads = sum([torch.sum(p.grad**2) for p in params if p.grad is not None])
+    norm = torch.sqrt(grads)
+
+    if norm >= max_lr_norm:
+        scale_factor = max_lr_norm / (norm + eps)
+        for p in params:
+            if p.grad is None:
+                continue
+            p.grad.mul_(scale_factor)
+
+
