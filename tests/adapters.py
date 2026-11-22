@@ -10,7 +10,7 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 from cs336_basics.bpe_tokenizer import BPETokenizer, BPETokenizerTrainer
-from cs336_basics.transformer import AdamW, Embedding, Linear, MultiHeadSelfAttention, RMSNorm, RoPE, SwiGLUFFN, TransformerBlock, TransformerLM, cross_entropy, gradient_clipping, lr_cosine_schedule, scaled_dot_product_attention, softmax
+from cs336_basics.transformer import AdamW, Embedding, Linear, MultiHeadSelfAttention, RMSNorm, RoPE, SwiGLUFFN, TransformerBlock, TransformerLM, cross_entropy, get_batch, gradient_clipping, load_checkpoint, lr_cosine_schedule, save_checkpoint, scaled_dot_product_attention, softmax
 
 
 
@@ -426,8 +426,7 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    raise NotImplementedError
-
+    return get_batch(dataset, batch_size, context_length, device)
 
 def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
     """
@@ -523,8 +522,7 @@ def run_save_checkpoint(
             we've completed.
         out (str | os.PathLike | BinaryIO | IO[bytes]): Path or file-like object to serialize the model, optimizer, and iteration to.
     """
-    raise NotImplementedError
-
+    return save_checkpoint(model, optimizer, iteration, out)
 
 def run_load_checkpoint(
     src: str | os.PathLike | BinaryIO | IO[bytes],
@@ -544,8 +542,7 @@ def run_load_checkpoint(
     Returns:
         int: the previously-serialized number of iterations.
     """
-    raise NotImplementedError
-
+    return load_checkpoint(src, model, optimizer)
 
 def get_tokenizer(
     vocab: dict[int, bytes],
