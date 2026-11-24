@@ -313,7 +313,7 @@ class TransformerBlock(torch.nn.Module):
         y2 = y + self.ffn.forward(self.ln2.forward(y))
         return y2
 
-class TransformerLM(torch.nn.Module):
+class Transformer(torch.nn.Module):
     def __init__(self, vocab_size: int, context_length: int, d_model: int, num_layers: int, num_heads: int, d_ff: int, rope_theta: float, device = None, dtype = None) -> None:
         super().__init__()
         self.token_embeddings = Embedding(vocab_size, d_model, device, dtype)

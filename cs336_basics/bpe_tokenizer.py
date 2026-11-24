@@ -1,13 +1,17 @@
 import cProfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import os
 import pickle
 import pstats
+import random
 import regex as re
 from regex import Pattern
 
 from collections import defaultdict
 import time
 from typing import Iterator, Iterable
+import numpy as np
+from tqdm import tqdm
 
 from cs336_basics.pretokenization_example import find_chunk_boundaries
 
@@ -17,6 +21,9 @@ Sequence = tuple[bytes, ...]
 # pre-tokenize regex pat, same across trainers
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 ENCODING = "utf-8"
+DEFAULT_SPECIAL_TOKEN = "<|endoftext|>"
+
+BASE_DATA_PATH = "/home/qinyuanbo/git/cs336_data"
 
 class BPETokenizerTrainer:
     special_tokens: list[str] = ["<|endoftext|>"]
@@ -153,7 +160,7 @@ class BPETokenizerTrainer:
             # by sending each start/end pair to a set of processes.
             for start, end in zip(boundaries[:-1], boundaries[1:]):
                 f.seek(start)
-                chunk = f.read(end - start).decode("utf-8", errors="ignore")
+                chunk = f.read(end - start).decode(ENCODING, errors="ignore")
                 # Run pre-tokenization on your chunk and store the counts for each pre-token
                 yield chunk
 
@@ -468,6 +475,81 @@ class BPETokenizer:
         text = result_bytes.decode(ENCODING, errors = "replace")
         # print(f"decode ids:{ids}, text:{text}")
         return text
+
+def train_from_path(vocab_size: int, special_tokens: list[str], train_path: str, save_path: str, process_num: int = 16):
+    trainer = BPETokenizerTrainer(vocab_size, special_tokens)
+    trainer.train_from_scratch(train_path, process_num)
+    trainer.save_to(save_path)
+
+def sample_data(text: str, sample_count: int = 10) -> list[str]:
+    special_tokens: list[str] = [DEFAULT_SPECIAL_TOKEN]
+    split_by_special_tokens = re.compile("|".join(map(re.escape, special_tokens)))
+    chunks = split_by_special_tokens.split(text)
+    return random.sample(chunks, sample_count)
+
+def cal_compression_ratio(dataset_path, tokenizer_path, sample_count = 10):
+    tokenizer = BPETokenizer.from_files(tokenizer_path)
+
+    chunks = [chunk for chunk in BPETokenizerTrainer.read_from_path(dataset_path, chunk_num=1)]
+    sample_docs = sample_data(chunks[0], sample_count)
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    start_time = time.time()
+    token_len = sum(len(tokenizer.encode(doc)) for doc in sample_docs)
+    end_time = time.time()
+
+    profiler.disable()
+    profiler.dump_stats("profile.out")
+
+    bytes_len = sum(len(doc.encode(ENCODING)) for doc in sample_docs)
+
+    print(
+        f"compression_ratio = token_len {token_len} / bytes_len {bytes_len} = {(token_len / bytes_len):.4f}"
+    )
+    print(
+        f"throughput = bytes {bytes_len} / tokenize_time {(end_time - start_time):.2f} = {(bytes_len / (end_time - start_time))} bytes/second"
+    )
+
+def tokenize_dataset(dataset_path, tokenizer_path, output_path):
+    tokenizer = BPETokenizer.from_files(path=tokenizer_path, special_tokens=[DEFAULT_SPECIAL_TOKEN])
+    chunk_num = 1024
+    batch_size = 16
+    process_num = 9
+
+    result = []
+    def batch_encode(chunks: list[str]):
+        with ProcessPoolExecutor(max_workers=process_num) as executor:
+            futures = [
+                executor.submit(
+                    tokenizer.encode, chunk
+                ) for chunk in chunks
+            ]
+            for f in as_completed(futures):
+                tokens = f.result()
+                tokens_arr = np.array(tokens, dtype=np.uint16)
+                result.append(tokens_arr)
+
+    chunks = [chunk for chunk in BPETokenizerTrainer.read_from_path(dataset_path, chunk_num)]
+    for i in tqdm(range(0, len(chunks), batch_size)):
+        batch_encode(chunks[i: i + batch_size])
+
+    result = np.concatenate(result)
+    np.save(output_path, result)
+
+def parse_abs_path(relative_path):
+    return BASE_DATA_PATH + "/" + relative_path
+
+if __name__ == "__main__":
+    # train_from_path(10000, [DEFAULT_SPECIAL_TOKEN], parse_abs_path("TinyStoriesV2-GPT4-train.txt"), parse_abs_path("tiny_stories_vocab.pkl"))
+    # train_from_path(32000, [DEFAULT_SPECIAL_TOKEN], parse_abs_path("owt_train.txt"), parse_abs_path("owt_vocab.pkl"))
+
+    # cal_compression_ratio(parse_abs_path("TinyStoriesV2-GPT4-valid.txt"), parse_abs_path("tiny_stories_vocab.pkl"), 100)
+
+    # tokenize_dataset(parse_abs_path("TinyStoriesV2-GPT4-valid.txt"), parse_abs_path("tiny_stories_vocab.pkl"), parse_abs_path("tiny_stories_valid.npy"))
+    tokenize_dataset(parse_abs_path("TinyStoriesV2-GPT4-train.txt"), parse_abs_path("tiny_stories_vocab.pkl"), parse_abs_path("tiny_stories_train.npy"))
+
 
 
 

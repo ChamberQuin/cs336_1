@@ -10,7 +10,7 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 from cs336_basics.bpe_tokenizer import BPETokenizer, BPETokenizerTrainer
-from cs336_basics.transformer import AdamW, Embedding, Linear, MultiHeadSelfAttention, RMSNorm, RoPE, SwiGLUFFN, TransformerBlock, TransformerLM, cross_entropy, get_batch, gradient_clipping, load_checkpoint, lr_cosine_schedule, save_checkpoint, scaled_dot_product_attention, softmax
+from cs336_basics.transformer import AdamW, Embedding, Linear, MultiHeadSelfAttention, RMSNorm, RoPE, SwiGLUFFN, TransformerBlock, Transformer, cross_entropy, get_batch, gradient_clipping, load_checkpoint, lr_cosine_schedule, save_checkpoint, scaled_dot_product_attention, softmax
 
 
 
@@ -364,7 +364,7 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    lm = TransformerLM(vocab_size, context_length, d_model, num_layers, num_heads, d_ff, rope_theta)
+    lm = Transformer(vocab_size, context_length, d_model, num_layers, num_heads, d_ff, rope_theta)
     lm.load_weight(weights)
     return lm.forward(in_indices)
 
