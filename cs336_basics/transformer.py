@@ -390,7 +390,7 @@ def lr_cosine_schedule(t: int, lr_max: float, lr_min: float, t_w: int, t_c: int)
     else:
         return lr_min
 
-def gradient_clipping(params: Iterable[torch.nn.Parameter], max_lr_norm: float):
+def gradient_clipping(params: Iterable[torch.nn.Parameter], max_lr_norm: float) -> float:
     eps = 1e-6
 
     grads = sum([torch.sum(p.grad**2) for p in params if p.grad is not None])
@@ -402,6 +402,7 @@ def gradient_clipping(params: Iterable[torch.nn.Parameter], max_lr_norm: float):
             if p.grad is None:
                 continue
             p.grad.mul_(scale_factor)
+    return norm
 
 def get_batch(dataset: npt.NDArray, batch_size: int, context_length: int, device = None) -> tuple[torch.Tensor, torch.Tensor]:
     assert len(dataset) > context_length + 1
@@ -428,8 +429,9 @@ def save_checkpoint(model: torch.nn.Module, optimizer: torch.optim.Optimizer, it
     }
     torch.save(state_dict, out)
 
-def load_checkpoint(src: str | os.PathLike | BinaryIO | IO[bytes], model: torch.nn.Module, optimizer: torch.optim.Optimizer) -> int:
+def load_checkpoint(src: str | os.PathLike | BinaryIO | IO[bytes], model: torch.nn.Module, optimizer: torch.optim.Optimizer | None = None) -> int:
     state_dict = torch.load(src)
     model.load_state_dict(state_dict["model"])
-    optimizer.load_state_dict(state_dict["optimizer"])
+    if optimizer is not None:
+        optimizer.load_state_dict(state_dict["optimizer"])
     return state_dict["iter"]

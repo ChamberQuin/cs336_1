@@ -166,3 +166,5 @@ cython_debug/
 
 *.log
 profile.out
+tmp/
+wandb/
